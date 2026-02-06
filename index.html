@@ -178,6 +178,26 @@
       border-top: 1px solid var(--line);
       margin: 14px 0 0;
     }
+  
+    /* Simulated (auto-filled) answers appear in blue ink */
+    .simulated-answer { color: #2563eb !important; }
+    label.simulated-answer span { color: #2563eb !important; }
+
+  
+    /* PDF capture mode: hide controls and ensure text wraps nicely */
+    body.pdf-mode #status,
+    body.pdf-mode #saveBtn,
+    body.pdf-mode #clearBtn,
+    body.pdf-mode button[type="submit"] {
+      display: none !important;
+      visibility: hidden !important;
+    }
+    body.pdf-mode textarea {
+      overflow: visible !important;
+      white-space: pre-wrap !important;
+      word-break: break-word !important;
+    }
+
   </style>
 </head>
 
@@ -577,11 +597,397 @@
           <div class="status" id="status">Draft not saved.</div>
           <button type="button" id="clearBtn">Clear</button>
           <button type="button" id="saveBtn">Save Draft</button>
-          <button type="submit" class="primary">PRINT</button>
+          <button type="submit" class="primary" disabled disabled disabled>PRINT</button>
         </div>
       </div>
     </form>
   </div>
+
+  
+  <!-- PDF export dependencies (client-side) -->
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+
+<script>
+    // Pre-flight: ensure the Clear button works even if other scripts fail.
+    document.addEventListener("DOMContentLoaded", () => {
+      const form = document.getElementById("bf-form");
+      const clearBtn = document.getElementById("clearBtn");
+      const statusEl = document.getElementById("status");
+      if (!form || !clearBtn) return;
+
+      clearBtn.addEventListener("click", () => {
+        try {
+          // Clear storage (best-effort)
+          try { localStorage.removeItem("bias_fairness_questionnaire_v1"); } catch (e) {}
+          try { localStorage.removeItem("bias_fairness_draft"); } catch (e) {}
+
+          // Reset built-in controls
+          form.reset();
+
+          // Hard reset for stubborn state (checkbox/radio/select/text)
+          form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(i => { i.checked = false; });
+          form.querySelectorAll("select").forEach(sel => { sel.selectedIndex = 0; });
+          form.querySelectorAll('input[type="text"], textarea').forEach(el => { el.value = ""; });
+
+          if (statusEl) statusEl.textContent = "Cleared.";
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        } catch (err) {
+          console.error("Clear failed:", err);
+          if (statusEl) statusEl.textContent = "Clear failed. See console for details.";
+        }
+      });
+    });
+  </script>
+
+  <script>
+    // Pre-flight: Save Draft simulation (fills required fields with realistic example answers)
+    document.addEventListener("DOMContentLoaded", () => {
+      const form = document.getElementById("bf-form");
+      const saveBtn = document.getElementById("saveBtn");
+      const statusEl = document.getElementById("status");
+      if (!form || !saveBtn) return;
+
+      const nowStamp = () => new Date().toLocaleString();
+
+      const mark = (el) => {
+        try { el.classList.add("simulated-answer"); } catch (e) {}
+      };
+
+      const pickFirstNonEmpty = (sel) => {
+        const opts = Array.from(sel.options || []);
+        const found = opts.find(o => (o.value ?? "") !== "");
+        return found ? found.value : (opts[0] ? opts[0].value : "");
+      };
+
+      const chooseByKeyword = (optionsLike, keywords) => {
+        const opts = Array.from(optionsLike || []);
+        const lower = opts.map(o => ({
+          v: (o.value || "").toLowerCase(),
+          t: (o.textContent || "").toLowerCase(),
+          val: o.value
+        }));
+        for (const kw of (keywords || [])) {
+          const k = kw.toLowerCase();
+          const hit = lower.find(x => x.v.includes(k) || x.t.includes(k));
+          if (hit) return hit.val;
+        }
+        return null;
+      };
+
+      const rationaleTemplate = (topic) => {
+        const base =
+          "Rationale: Based on the use case and governance expectations, the selections below are intended to be auditable, " +
+          "repeatable, and proportionate to risk. We considered subgroup outcomes, potential proxy variables, and operational " +
+          "impacts, and selected metrics/thresholds aligned to policy and applicable regulatory guidance. Monitoring includes " +
+          "defined triggers, accountable owners, and documented remediation steps.";
+        return topic ? (base + "\n\nNotes: " + topic) : base;
+      };
+
+      function simulateRequiredSelects() {
+        form.querySelectorAll("select[required]").forEach(sel => {
+          if (sel.value) return;
+
+          const preferred = chooseByKeyword(sel.options, [
+            "yes", "in use", "high", "medium", "low",
+            "monthly", "quarterly", "annually",
+            "disparate impact", "demographic parity", "equalized odds", "equal opportunity",
+            "accuracy", "auc", "f1", "precision", "recall",
+            "psi", "ks", "drift",
+            "human", "review", "approval"
+          ]);
+
+          sel.value = preferred ?? pickFirstNonEmpty(sel);
+          mark(sel);
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      }
+
+      function simulateCheckboxesAndRadios() {
+        // Goal: ensure checkbox/radio questions marked with a visible "*" (span.req) get at least one selection.
+        // Many checkbox groups in this form are "required" by UX, but the inputs are not marked with the HTML required attribute.
+
+        // 1) Handle any groups that ARE marked required at the input level (by name)
+        const req = form.querySelectorAll('input[type="checkbox"][required], input[type="radio"][required]');
+        const names = new Set(Array.from(req).map(x => x.name).filter(Boolean));
+
+        names.forEach(name => {
+          const group = form.querySelectorAll(`input[name="${name}"]`);
+          if (!group.length) return;
+          if (Array.from(group).some(x => x.checked)) return;
+
+          let chosen =
+            Array.from(group).find(x => (x.value || "").toLowerCase() === "yes") ||
+            group[0];
+
+          if (chosen) {
+            chosen.checked = true;
+            chosen.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        });
+
+        // 2) For questions with a visible required "*" (span.req), ensure at least one checkbox/radio is selected
+        const requiredQs = form.querySelectorAll(".q");
+        requiredQs.forEach(q => {
+          const hasStar = !!q.querySelector("label .req, label.title .req, .title .req");
+          if (!hasStar) return;
+
+          const inputs = q.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+          if (!inputs.length) return;
+
+          const anyChecked = Array.from(inputs).some(i => i.checked);
+          if (anyChecked) return;
+
+          // Choose first meaningful option (prefer non-"Other" if possible)
+          let chosen = Array.from(inputs).find(i => {
+            const v = (i.value || "").toLowerCase();
+            const id = (i.id || "").toLowerCase();
+            return !v.includes("other") && !id.includes("other");
+          }) || inputs[0];
+
+          chosen.checked = true;
+          chosen.dispatchEvent(new Event("change", { bubbles: true }));
+
+          // Make the selected option's label text appear blue (simulated)
+          const lab = chosen.closest("label");
+          if (lab) lab.classList.add("simulated-answer");
+        });
+
+        // 3) Fallback: required inputs without a name
+        form.querySelectorAll('input[type="checkbox"][required]:not([name]), input[type="radio"][required]:not([name])')
+          .forEach((inp) => {
+            if (!inp.checked) {
+              inp.checked = true;
+              inp.dispatchEvent(new Event("change", { bubbles: true }));
+              const lab = inp.closest("label");
+              if (lab) lab.classList.add("simulated-answer");
+            }
+          });
+      }
+
+      function simulateRequiredTextInputs() {
+        form.querySelectorAll('input[type="text"][required]').forEach(inp => {
+          if (inp.value && inp.value.trim()) return;
+          inp.value = "See documented rationale and supporting evidence.";
+          mark(inp);
+          inp.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+      }
+
+      function simulateRequiredTextareas() {
+        form.querySelectorAll("textarea[required]").forEach((ta, idx) => {
+          if (ta.value && ta.value.trim()) return;
+
+          const topic =
+            idx === 0 ? "Fairness objective is to avoid unjustified differences across protected groups while maintaining utility."
+            : idx === 1 ? "Data review confirms coverage for key segments; known gaps are documented with mitigations."
+            : idx === 2 ? "Primary metrics include subgroup error-rate parity and disparate impact ratio with policy-aligned thresholds."
+            : "Monitoring includes periodic subgroup checks, drift alerts, and escalation/mitigation playbooks.";
+
+          ta.value = rationaleTemplate(topic);
+          mark(ta);
+          ta.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+      }
+
+      function simulateFillAllRequired() {
+        simulateRequiredSelects();
+        simulateCheckboxesAndRadios();
+        simulateRequiredTextInputs();
+        simulateRequiredTextareas();
+      }
+
+      saveBtn.addEventListener("click", () => {
+        try {
+          simulateFillAllRequired();
+          try { localStorage.setItem("bias_fairness_simulated_draft", JSON.stringify({ saved_at: new Date().toISOString() })); } catch (e) {}
+          if (statusEl) statusEl.textContent = "Draft populated with sample answers: " + nowStamp();
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        } catch (err) {
+          console.error("Save Draft simulation failed:", err);
+          if (statusEl) statusEl.textContent = "Save Draft failed. See console for details.";
+        }
+      });
+    });
+  </script>
+
+  <script>
+    // Pre-flight: PRINT gating + PDF download (works even if later scripts error)
+    document.addEventListener("DOMContentLoaded", () => {
+      const form = document.getElementById("bf-form");
+      const statusEl = document.getElementById("status");
+      const printBtn = form ? form.querySelector('button[type="submit"]') : null;
+      if (!form || !printBtn) return;
+
+      // Always start disabled; enable only when required questions are complete.
+      printBtn.disabled = true;
+
+      const hasStar = (q) => !!q.querySelector(".req");
+
+      const isInputFilled = (el) => {
+        if (!el) return true;
+        const tag = el.tagName;
+        const type = (el.type || "").toLowerCase();
+
+        if (type === "checkbox" || type === "radio") {
+          // group requirement by name if present, else by container
+          if (el.name) {
+            const group = form.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`);
+            return Array.from(group).some(x => x.checked);
+          }
+          return el.checked;
+        }
+        if (tag === "SELECT") return (el.value ?? "") !== "";
+        return ((el.value ?? "").trim().length > 0);
+      };
+
+      const isQuestionCompleted = (q) => {
+        // If question has visible star, treat as required even if HTML required attr is missing
+        const starred = hasStar(q);
+
+        // 1) Any explicitly required elements inside must be filled
+        const reqEls = q.querySelectorAll("[required]");
+        for (const el of reqEls) {
+          if (!isInputFilled(el)) return false;
+        }
+
+        if (!starred) return true; // only enforce [required] unless starred
+
+        // 2) For starred questions: enforce at least one meaningful answer within the question block
+        const checks = q.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+        if (checks.length) {
+          return Array.from(checks).some(c => c.checked);
+        }
+
+        const selects = q.querySelectorAll("select");
+        if (selects.length) {
+          return Array.from(selects).every(s => (s.value ?? "") !== "");
+        }
+
+        const texts = q.querySelectorAll('input[type="text"], textarea');
+        if (texts.length) {
+          // Some starred blocks have multiple text areas; require the starred one(s) be filled.
+          return Array.from(texts).every(t => ((t.value ?? "").trim().length > 0));
+        }
+
+        // If no recognizable inputs, don't block printing
+        return true;
+      };
+
+      const updatePrintButtonState = () => {
+        const questions = form.querySelectorAll(".q");
+        const allOk = Array.from(questions).every(isQuestionCompleted);
+        printBtn.disabled = !allOk;
+      };
+
+      // Listen to changes on the whole form
+      form.addEventListener("input", updatePrintButtonState, true);
+      form.addEventListener("change", updatePrintButtonState, true);
+
+      // Initial state (covers case where Save Draft loads/fills quickly)
+      setTimeout(updatePrintButtonState, 0);
+
+      // PRINT -> generate PDF download
+      printBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        updatePrintButtonState();
+        if (printBtn.disabled) {
+          if (statusEl) statusEl.textContent = "Please complete all required fields before printing.";
+          return;
+        }
+
+        if (statusEl) statusEl.textContent = "Preparing PDF…";
+
+        // --- Prepare page for clean PDF capture ---
+        const prevScrollY = window.scrollY;
+        const active = document.activeElement;
+        if (active && active.blur) active.blur();
+
+        // Add capture mode (hides buttons/status via CSS)
+        document.body.classList.add("pdf-mode");
+
+        // Auto-expand textareas so long lines aren't clipped
+        const textareas = Array.from(document.querySelectorAll("textarea"));
+        const taPrev = textareas.map(ta => ({
+          el: ta,
+          height: ta.style.height,
+          overflow: ta.style.overflow,
+          whiteSpace: ta.style.whiteSpace
+        }));
+        textareas.forEach(ta => {
+          // Force wrap-friendly rendering and expand height
+          ta.style.whiteSpace = "pre-wrap";
+          ta.style.overflow = "visible";
+          ta.style.height = "auto";
+          ta.style.height = (ta.scrollHeight + 4) + "px";
+        });
+
+        // Scroll to the very top so header/title/instructions are included
+        window.scrollTo(0, 0);
+
+        try {
+          // Capture the main form area (including header/title).
+          // Prefer the top-level container; fall back to body.
+          const target =
+            document.querySelector(".container") ||
+            document.querySelector("main") ||
+            document.body;
+
+          const canvas = await html2canvas(target, {
+            scale: 2,
+            useCORS: true,
+            backgroundColor: "#ffffff",
+            scrollX: 0,
+            scrollY: 0,
+            windowWidth: document.documentElement.clientWidth,
+            windowHeight: document.documentElement.clientHeight
+          });
+
+          const imgData = canvas.toDataURL("image/png");
+          const { jsPDF } = window.jspdf;
+
+          const pdf = new jsPDF({ orientation: "p", unit: "pt", format: "a4" });
+          const pageWidth = pdf.internal.pageSize.getWidth();
+          const pageHeight = pdf.internal.pageSize.getHeight();
+
+          const imgWidth = pageWidth;
+          const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+          let remaining = imgHeight;
+          pdf.addImage(imgData, "PNG", 0, 0, imgWidth, imgHeight);
+
+          while (remaining > pageHeight) {
+            remaining -= pageHeight;
+            pdf.addPage();
+            pdf.addImage(imgData, "PNG", 0, -(imgHeight - remaining), imgWidth, imgHeight);
+          }
+
+          const stamp = new Date().toISOString().slice(0, 10);
+          pdf.save(`bias_fairness_questionnaire_${stamp}.pdf`);
+
+          if (statusEl) statusEl.textContent = "PDF downloaded.";
+        } catch (err) {
+          console.error("PDF generation failed:", err);
+          if (statusEl) statusEl.textContent = "PDF generation failed. See console for details.";
+        } finally {
+          // Restore textarea styles
+          taPrev.forEach(x => {
+            x.el.style.height = x.height;
+            x.el.style.overflow = x.overflow;
+            x.el.style.whiteSpace = x.whiteSpace;
+          });
+
+          // Remove capture mode and restore scroll
+          document.body.classList.remove("pdf-mode");
+          window.scrollTo(0, prevScrollY);
+        }
+      });
+    });
+  </script>
+
+
+
+
 <script>
     const FORM_KEY = "bias_fairness_questionnaire_v1";
     const form = document.getElementById("bf-form");
@@ -687,13 +1093,112 @@
       pdf.save(`bias_fairness_questionnaire_${stamp}.pdf`);
     }
 
-function saveDraft() {
+
+    
+    // -------------------------------
+    // Completion gating for PRINT
+    // -------------------------------
+    function isFieldCompleted(el) {
+      // Treat checkbox/radio as a group requirement by name
+      if (el.type === "checkbox" || el.type === "radio") {
+        const group = form.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`);
+        return Array.from(group).some(x => x.checked);
+      }
+      if (el.tagName === "SELECT") {
+        return el.value !== "";
+      }
+      return (el.value ?? "").trim().length > 0;
+    }
+
+    function updatePrintButtonState() {
+      const required = form.querySelectorAll("[required]");
+      const allDone = required.length > 0 && Array.from(required).every(isFieldCompleted);
+      const printBtn = form.querySelector('button[type="submit"]');
+      if (printBtn) printBtn.disabled = !allDone;
+    }
+
+    function attachCompletionListeners() {
+      // Start disabled no matter what; we'll enable once validation passes
+      const printBtn = form.querySelector('button[type="submit"]');
+      if (printBtn) printBtn.disabled = true;
+
+      const required = form.querySelectorAll("[required]");
+      required.forEach(el => {
+        el.addEventListener("change", updatePrintButtonState);
+        el.addEventListener("input", updatePrintButtonState);
+      });
+
+      updatePrintButtonState();
+    }
+
+    // -------------------------------
+    // Save Draft: simulate completion
+    // -------------------------------
+    function pickFirstNonEmptyOption(selectEl) {
+      for (let i = 0; i < selectEl.options.length; i++) {
+        const opt = selectEl.options[i];
+        if ((opt.value ?? "") !== "") return opt.value;
+      }
+      return "";
+    }
+
+    function fillRationale(ta, hint) {
+      const base =
+        "Rationale: Based on the stated use case, the defined protected groups, and observed data characteristics, " +
+        "we selected fairness definitions and metrics aligned to policy and applicable regulatory expectations. " +
+        "Testing includes baseline evaluation, subgroup performance review, and ongoing monitoring triggers. " +
+        "Mitigations and human oversight are documented with clear ownership, thresholds, and audit-ready evidence.";
+      ta.value = hint ? (base + "\n\n" + hint) : base;
+    }
+
+    function simulateFormFill() {
+      // 1) Required selects
+      form.querySelectorAll("select[required]").forEach(sel => {
+        if (!sel.value) sel.value = pickFirstNonEmptyOption(sel);
+      });
+
+      // 2) Required checkbox/radio groups: ensure at least one checked per group
+      const requiredChecks = form.querySelectorAll('input[type="checkbox"][required], input[type="radio"][required]');
+      const names = new Set(Array.from(requiredChecks).map(i => i.name));
+      names.forEach(name => {
+        const group = form.querySelectorAll(`input[name="${CSS.escape(name)}"]`);
+        if (!Array.from(group).some(x => x.checked)) {
+          // Prefer a non-empty value option if present
+          const candidate = Array.from(group).find(x => (x.value ?? "") !== "") || group[0];
+          if (candidate) candidate.checked = true;
+        }
+      });
+
+      // 3) Required text inputs
+      form.querySelectorAll('input[type="text"][required]').forEach(inp => {
+        if (!inp.value || !inp.value.trim()) inp.value = "See documented rationale and supporting evidence.";
+      });
+
+      // 4) Required textareas: realistic governance-friendly rationale
+      form.querySelectorAll("textarea[required]").forEach((ta, idx) => {
+        if (!ta.value || !ta.value.trim()) {
+          // Add a slightly different hint per textarea to look more realistic
+          const hint =
+            idx === 0 ? "Key considerations: sample representativeness, proxy variables, and disparate impact risk."
+            : idx === 1 ? "Key considerations: threshold selection, confidence intervals, and action plans for breaches."
+            : "Key considerations: documentation, sign-offs, and evidence retention for audit/regulatory review.";
+          fillRationale(ta, hint);
+        }
+      });
+    }
+
+    function saveDraft() {
+      simulateFormFill();
+
       const payload = {
         saved_at: new Date().toISOString(),
         data: formToJSON(form)
       };
       localStorage.setItem(FORM_KEY, JSON.stringify(payload));
-      statusEl.textContent = "Draft saved: " + nowStamp();
+
+      statusEl.textContent = "Draft populated and saved: " + new Date(payload.saved_at).toLocaleString();
+      updatePrintButtonState();
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
     function loadDraft() {
@@ -701,25 +1206,51 @@ function saveDraft() {
       if (!raw) return;
       try {
         const payload = JSON.parse(raw);
-        jsonToForm(form, payload.data);
-        statusEl.textContent = "Draft loaded (saved: " + new Date(payload.saved_at).toLocaleString() + ")";
+        if (payload && payload.data) {
+          jsonToForm(form, payload.data);
+          statusEl.textContent = "Draft loaded (saved: " + new Date(payload.saved_at).toLocaleString() + ")";
+        }
       } catch (e) {
         console.warn("Failed to load draft:", e);
+      } finally {
+        updatePrintButtonState();
       }
     }
 
     function clearDraftAndForm() {
-      if (!confirm("Clear all responses and remove saved draft?")) return;
+      // Always clear without relying on reset quirks
       localStorage.removeItem(FORM_KEY);
       form.reset();
-      statusEl.textContent = "Draft cleared.";
+
+      // Explicitly clear checkboxes/radios in case browser retains state
+      form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(i => { i.checked = false; });
+
+      // Explicitly reset selects to placeholder/first option
+      form.querySelectorAll("select").forEach(sel => {
+        sel.selectedIndex = 0;
+      });
+
+      // Clear text inputs/textareas
+      form.querySelectorAll('input[type="text"], textarea').forEach(el => { el.value = ""; });
+
+      statusEl.textContent = "Cleared.";
+      updatePrintButtonState();
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
+    // Wire buttons
     document.getElementById("saveBtn").addEventListener("click", saveDraft);
     document.getElementById("clearBtn").addEventListener("click", clearDraftAndForm);
 
-    form.addEventListener("submit", async (e) => {
+    // Init
+    window.addEventListener("DOMContentLoaded", () => {
+      attachCompletionListeners();
+      loadDraft();
+    });
+
+
+
+form.addEventListener("submit", async (e) => {
       
       
       e.preventDefault();
