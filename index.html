@@ -642,7 +642,52 @@
     }
 
 
-    function saveDraft() {
+    
+    async function exportCurrentViewPDF() {
+      // Capture the visible questionnaire content as-is and save to PDF (client-side).
+      const el = document.querySelector(".container") || document.body;
+
+      // Ensure we are at the top so headers are included
+      try { window.scrollTo(0, 0); } catch (e) {}
+
+      // Render element to canvas
+      const canvas = await html2canvas(el, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        windowWidth: document.documentElement.scrollWidth,
+        windowHeight: document.documentElement.scrollHeight,
+        scrollX: 0,
+        scrollY: -window.scrollY
+      });
+
+      const imgData = canvas.toDataURL("image/png");
+      const { jsPDF } = window.jspdf;
+
+      const pdf = new jsPDF({ orientation: "p", unit: "pt", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+
+      const imgWidth = pageWidth;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+      let remaining = imgHeight;
+
+      // Add first page
+      pdf.addImage(imgData, "PNG", 0, 0, imgWidth, imgHeight);
+
+      // Add additional pages as needed by shifting the same image upward
+      while (remaining > pageHeight) {
+        remaining -= pageHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, -(imgHeight - remaining), imgWidth, imgHeight);
+      }
+
+      const stamp = new Date().toISOString().slice(0,10);
+      pdf.save(`bias_fairness_questionnaire_${stamp}.pdf`);
+    }
+
+function saveDraft() {
       const payload = {
         saved_at: new Date().toISOString(),
         data: formToJSON(form)
@@ -674,29 +719,34 @@
     document.getElementById("saveBtn").addEventListener("click", saveDraft);
     document.getElementById("clearBtn").addEventListener("click", clearDraftAndForm);
 
-    form.addEventListener("submit", (e) => {
+    form.addEventListener("submit", async (e) => {
+      
       
       e.preventDefault();
 
-      // Update UI status
-      statusEl.textContent = "Preparing to print...";
+      // If the form uses native required fields, enforce them before exporting.
+      // reportValidity() shows the browser's validation UI.
+      if (typeof form.reportValidity === "function" && !form.reportValidity()) return;
 
-      // Close the tab after printing (works best if the page was opened by script;
-      // otherwise the browser may ignore window.close()).
-      const closeAfterPrint = () => {
-        try { window.close(); } catch (err) {}
-      };
+      statusEl.textContent = "Preparing to save PDF...";
+      const printBtn = form.querySelector('button[type="submit"]');
+      if (printBtn) { printBtn.disabled = true; printBtn.textContent = "Working…"; }
 
-      // Some browsers fire afterprint reliably; others may not.
-      window.addEventListener("afterprint", closeAfterPrint, { once: true });
+      try {
+        await exportCurrentViewPDF();
+        statusEl.textContent = "PDF saved.";
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Could not generate PDF. Please try again.";
+        if (printBtn) { printBtn.disabled = false; printBtn.textContent = "PRINT"; }
+        return;
+      }
 
-      // Let the status text render before opening the print dialog
+      // Attempt to close the tab (may be blocked unless opened by script)
       setTimeout(() => {
-        window.print();
+        try { window.close(); } catch (e) {}
+      }, 400);
 
-        // Fallback: if afterprint doesn't fire, attempt close shortly after
-        setTimeout(closeAfterPrint, 1500);
-      }, 50);
 
     });
 
